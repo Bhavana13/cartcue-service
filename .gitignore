@@ -1,0 +1,18 @@
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# Python Caches & Compiled Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyCharm Configs
+.idea/
+
+# Environment Variables & GCP Service Accounts
+.env
+*.json
+!service-account.json.example
