@@ -15,4 +15,4 @@ __pycache__/
 # Environment Variables & GCP Service Accounts
 .env
 *.json
-!service-account.json.example
+!service-account.json.example.idea/
