@@ -11,6 +11,7 @@ __pycache__/
 
 # PyCharm Configs
 .idea/
+.agents/
 
 # Environment Variables & GCP Service Accounts
 .env
