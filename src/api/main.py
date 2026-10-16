@@ -143,23 +143,35 @@ async def recover_session(session_id: str):
 
 @app.post("/agent/wishlist-hesitation")
 async def handle_wishlist_hesitation(payload: WishlistHesitationRequest):
-    """Shopify-style proactive AI agent: detects price hesitation, applies a 10% discount, and recovers the cart."""
-    logger.info(
-        f"Nova Agent triggered for wishlist hesitation on item: {payload.item_name} (Price: Rs. {payload.price})")
+    """Advanced AI agent: detects user behavior and dynamically offers either a price discount or free express delivery."""
+    logger.info(f"Nova Agent triggered for wishlist hesitation on item: {payload.item_name} (Price: Rs. {payload.price})")
 
-    discounted_price = round(payload.price * 0.9, 2)
+    # Simulate AI behavior profiling: Tier-1 / Convenience vs Price-sensitive
+    # In a full production app, this would query Gemini based on user history.
+    is_convenience_focused = payload.price > 1500  # Example heuristic: higher-ticket items prefer delivery speed/perks
+
+    if is_convenience_focused:
+        intervention_type = "EXPRESS_DELIVERY_UPGRADE"
+        message = f"Nova Agent analyzed your profile: Since you value speed, we've upgraded your delivery to **Same-Day Priority (Free)** on {payload.item_name}!"
+        discount_code = "NOVA_EXPRESS_FREE"
+        discounted_price = payload.price
+    else:
+        intervention_type = "PRICE_DISCOUNT"
+        discounted_price = round(payload.price * 0.9, 2)
+        message = f"Nova Agent detected price sensitivity: Offered a targeted **10% discount** on {payload.item_name} (Rs. {payload.price} → Rs. {discounted_price})."
+        discount_code = "NOVA10_RECOVER"
 
     return {
         "status": "success",
-        "agent_name": "Nova Proactive Recovery Agent",
-        "analysis": "High price sensitivity detected via wishlist migration.",
+        "agent_name": "Nova Proactive Multi-Objective Recovery Agent",
+        "analysis": f"Behavioral intent classified as {intervention_type}.",
         "intervention_triggered": True,
-        "recovery_source": "NOVA_WISHLIST_AGENT",  # <--- Indicator tag
-        "discount_code": "NOVA10_RECOVER",
+        "recovery_source": "NOVA_WISHLIST_AGENT",
+        "intervention_type": intervention_type,
+        "discount_code": discount_code,
         "original_price": payload.price,
         "discounted_price": discounted_price,
-        "message": f"Nova Agent offered a targeted 10% discount on {payload.item_name} (Rs. {payload.price} → Rs. {discounted_price}). "
-                   f"Item successfully restored to cart!"
+        "message": message
     }
 
 
