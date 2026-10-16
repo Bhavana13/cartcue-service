@@ -3,41 +3,46 @@ name: Deploy Backend to Cloud Run
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 env:
-  PROJECT_ID: cartcue-ai-builder-cup  # Update with your actual GCP project ID
-  REGION: us-central1                 # Update with your GCP region
+  PROJECT_ID: cartcue-ai-builder-cup
+  REGION: us-central1
   SERVICE_NAME: cartcue-service
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
-      with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-    - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v2
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
 
-    - name: Configure Docker to use Artifact Registry
-      run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+      - name: Configure Docker to use Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
-    - name: Build and Push Docker Image
-      run: |
-        IMAGE_URL="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/cloud-run-source-deploy/${{ env.SERVICE_NAME }}:${{ github.sha }}"
-        docker build -t $IMAGE_URL .
-        docker push $IMAGE_URL
-        echo "IMAGE_URL=$IMAGE_URL" >> $GITHUB_ENV
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_URL="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/cloud-run-source-deploy/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          docker build -t $IMAGE_URL .
+          docker push $IMAGE_URL
+          echo "IMAGE_URL=$IMAGE_URL" >> $GITHUB_ENV
 
-    - name: Deploy to Cloud Run
-      run: |
-        gcloud run deploy ${{ env.SERVICE_NAME }} \
-          --image ${{ env.IMAGE_URL }} \
-          --region ${{ env.REGION }} \
-          --platform managed \
-          --allow-unauthenticated
+      - name: Deploy to Cloud Run and Set Environment Variables
+        env:
+          # Map your GitHub Repository Variable to a step-level environment variable
+          FIRESTORE_DATABASE: ${{ vars.PROD_FIRESTORE_DB }}
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.IMAGE_URL }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --update-env-vars=FIRESTORE_DATABASE=$FIRESTORE_DATABASE,ENVIRONMENT=production

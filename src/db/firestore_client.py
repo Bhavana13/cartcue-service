@@ -9,10 +9,17 @@ from src.db.models import CheckoutEvent, CheckoutSession, NovaAnalysis, SessionS
 logger = logging.getLogger("cartcue-firestore")
 
 class FirestoreClient:
-    def __init__(self, project_id: Optional[str] = None):
+    def __init__(self, project_id: Optional[str] = None, database_id: Optional[str] = None):
         self.project_id = project_id or os.getenv("GCP_PROJECT_ID", "cartcue-ai-builder-cup")
-        logger.info(f"Initializing Firestore AsyncClient for project: {self.project_id}")
-        self.db = firestore.AsyncClient(project=self.project_id)
+
+        # Dynamically select database: checks argument, then env variable, then defaults to '(default)'
+        self.database_id = database_id or os.getenv("FIRESTORE_DATABASE", "(default)")
+
+        logger.info(
+            f"Initializing Firestore AsyncClient for project: {self.project_id}, database: {self.database_id}")
+
+        # Pass the database parameter to AsyncClient
+        self.db = firestore.AsyncClient(project=self.project_id, database=self.database_id)
         self.sessions_ref = self.db.collection("checkout_sessions")
 
     async def save_session(self, session: CheckoutSession) -> None:
@@ -63,7 +70,8 @@ class FirestoreClient:
     async def update_session_status(self, session_id: str, new_status: SessionStatus) -> bool:
         """Updates the status of a checkout session in Firestore."""
         try:
-            doc_ref = self.db.collection("sessions").document(session_id)
+            # Fix: Use self.sessions_ref instead of self.db.collection("sessions")
+            doc_ref = self.sessions_ref.document(session_id)
             doc = await doc_ref.get()
             if not doc.exists:
                 return False
