@@ -17,6 +17,9 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Check Python sources compile
+        run: python3 -m compileall -q src
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:

@@ -1,19 +1,24 @@
 import logging
+import os
+import secrets
 import uuid
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Optional
 
-from fastapi import FastAPI, Query, Request, logger
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+import vertexai
 from vertexai.generative_models import GenerativeModel
 
 from src.agent.graph import nova_app
 from src.db.firestore_client import FirestoreClient
 from src.db.models import CauseCategory, CheckoutSession, WishlistHesitationRequest, SessionStatus, \
-    CheckoutOrderRequest, OrderModel, CartItem
+    CheckoutOrderRequest, ExitIntentRequest, OrderModel, CartItem
+from src.generator.simulator import SessionSimulator
 
 # Configure structured terminal logging
 logging.basicConfig(
@@ -22,7 +27,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cartcue-api")
 
-model = GenerativeModel("gemini-1.5-flash")
+vertexai.init(
+    project=os.getenv("GCP_PROJECT_ID", "cartcue-ai-builder-cup"),
+    location=os.getenv("GCP_REGION", "us-central1"),
+)
+model = GenerativeModel("gemini-2.5-flash")
 
 app = FastAPI(
     title="CartCue CheckoutSense API",
@@ -33,17 +42,19 @@ app = FastAPI(
 # Enable CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins for local development
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allows all headers
+    allow_origins=["*"],  # Public demo API; no cookies or credentials are used
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 db_client = FirestoreClient()
+simulator = SessionSimulator(db_client)
 
+# Shipping fees keyed by a substring of the storefront's shipping label
+SHIPPING_FEES = {"Express": 150.0, "Priority": 350.0}
+PLATFORM_FEE = 23.0
 
-class AnalyzeRequest(BaseModel):
-    session_id: str
+INTERNAL_ERROR = "Internal server error. Check service logs for details."
 
 
 class AnalyzeResponse(BaseModel):
@@ -54,6 +65,13 @@ class AnalyzeResponse(BaseModel):
     evidence_summary: List[str]
 
 
+def require_admin(admin_key: Optional[str]) -> None:
+    """Guards destructive endpoints with the ADMIN_API_KEY env var; they stay locked when it is unset."""
+    expected = os.getenv("ADMIN_API_KEY")
+    if not expected or not admin_key or not secrets.compare_digest(admin_key, expected):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
 @app.get("/health")
 async def health_check():
     logger.info("Health check endpoint pinged.")
@@ -62,7 +80,7 @@ async def health_check():
 
 @app.get("/sessions")
 async def get_recent_sessions(limit: int = Query(10, ge=1, le=50)):
-    """Fetches recent abandoned checkout sessions from Firestore."""
+    """Fetches the most recent checkout sessions from Firestore."""
     logger.info(f"Fetching recent sessions with limit={limit}")
     try:
         sessions = await db_client.get_recent_sessions(limit=limit)
@@ -70,7 +88,7 @@ async def get_recent_sessions(limit: int = Query(10, ge=1, le=50)):
         return sessions
     except Exception as e:
         logger.error(f"Error fetching recent sessions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
 
 
 @app.post("/sessions")
@@ -83,11 +101,7 @@ async def create_storefront_session(session: CheckoutSession):
         return {"status": "success", "session_id": session.session_id, "message": "Session saved successfully."}
     except Exception as e:
         logger.error(f"Error saving storefront session {session.session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-from datetime import datetime, timezone
-from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
 
 
 @app.post("/sessions/{session_id}/recover")
@@ -100,7 +114,9 @@ async def recover_session(session_id: str):
             raise HTTPException(status_code=404, detail="Session not found")
 
         session_data = doc.to_dict()
-        cause = session_data.get("ground_truth_cause", "UNKNOWN")
+        # Prefer Nova's diagnosis over the recorded trigger when one exists
+        cause = (session_data.get("nova_analysis") or {}).get("primary_cause") \
+            or session_data.get("ground_truth_cause", "UNKNOWN")
 
         # Tailor the mock email based on the specific diagnostic root cause
         if cause == "SHIPPING_COST_SURPRISE":
@@ -112,9 +128,12 @@ async def recover_session(session_id: str):
         elif cause == "TECHNICAL_DROP_OFF":
             email_subject = "Resume your Omnivo Cart - Special Assistance"
             email_body = "We resolved the account wall issue you encountered. Click here to instantly restore your cart items and finish checking out."
+        elif cause == "COUPON_PROMO_FAILURE":
+            email_subject = "Your Omnivo discount is still waiting!"
+            email_body = "Sorry your promo code didn't apply. Here is a fresh code so you can complete your order at the price you expected."
         else:
             email_subject = "Complete your Omnivo order!"
-            email_body = f"We noticed you left behind items in your cart due to {cause}. Click here to resume your checkout."
+            email_body = "We noticed you left behind items in your cart. Click here to resume your checkout."
 
         # Simulate a targeted recovery email based on the diagnostic cause
         mock_email = {
@@ -125,9 +144,9 @@ async def recover_session(session_id: str):
         }
 
         recovery_payload = {
-            "status": "WAITING_ON_USER_TO_ACT",
+            "status": SessionStatus.WAITING_ON_USER_TO_ACT.value,
             "metadata": {
-                "recovery_source": "NOVA_WISHLIST_AGENT",
+                "recovery_source": "NOVA_RECOVERY_EMAIL",
                 "nova_intervention_triggered": True,
                 "recovery_email": mock_email
             }
@@ -140,9 +159,12 @@ async def recover_session(session_id: str):
             "message": "Recovery email dispatched successfully",
             "mock_email": mock_email
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error recovering session {session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
+
 
 @app.post("/agent/wishlist-hesitation")
 async def handle_wishlist_hesitation(payload: WishlistHesitationRequest):
@@ -194,23 +216,23 @@ async def get_analytics_summary():
 
         for doc in docs:
             data = doc.to_dict()
-            status = data.get("status", "ABANDONED")
+            status = str(data.get("status", "ABANDONED")).upper()
             cart_value = data.get("cart_value", 0.0)
             metadata = data.get("metadata") or {}
 
-            if status == "COMPLETED":
+            if status == SessionStatus.COMPLETED.value:
                 total_completed += 1
-                # Check if recovered by Nova AI Agent
-                if metadata.get("recovery_source") == "NOVA_WISHLIST_AGENT" or metadata.get(
-                        "nova_intervention_triggered") is True:
+                # Only orders where a Nova intervention was applied count as AI recoveries
+                if metadata.get("nova_intervention_triggered") is True:
                     ai_recovered_count += 1
                     ai_recovered_revenue += cart_value
             else:
                 total_abandoned += 1
                 revenue_at_risk += cart_value
 
-        total_sessions = total_abandoned + total_completed
-        recovery_rate = round((total_completed / total_sessions * 100) if total_sessions > 0 else 0.0, 1)
+        # Share of at-risk checkouts that Nova won back
+        at_risk_sessions = total_abandoned + ai_recovered_count
+        recovery_rate = round((ai_recovered_count / at_risk_sessions * 100) if at_risk_sessions > 0 else 0.0, 1)
 
         return {
             "total_abandoned_sessions": total_abandoned,
@@ -224,65 +246,32 @@ async def get_analytics_summary():
         }
     except Exception as e:
         logger.error(f"Error generating analytics summary: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
 
 
 @app.post("/simulate")
 async def simulate_activity(count: int = Query(1, ge=1, le=10)):
-    """Programmatically generates mock checkout sessions on-demand using valid CauseCategory enums."""
+    """Generates mock abandoned sessions, with event telemetry, cycling through every CauseCategory."""
     logger.info(f"Triggering simulation for {count} mock session(s).")
+    causes = [c for c in CauseCategory if c != CauseCategory.UNKNOWN]
+
     simulated_sessions = []
-
-    trigger_mappings = [
-        {
-            "cause": CauseCategory.SHIPPING_COST_SURPRISE.value,
-            "step": "Checkout Review",
-            "label": "Shipping Fee Shock"
-        },
-        {
-            "cause": CauseCategory.PAYMENT_FRICTION.value,
-            "step": "Payment Processing",
-            "label": "Technical Gateway Timeout"
-        },
-        {
-            "cause": CauseCategory.TECHNICAL_DROP_OFF.value,
-            "step": "Authentication / Signup",
-            "label": "Forced Account Wall"
-        }
-    ]
-
-    for i in range(count):
-        session_id = f"cs_{uuid.uuid4().hex[:8]}"
-        mapping = trigger_mappings[i % len(trigger_mappings)]
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        session_doc = {
-            "session_id": session_id,
-            "ground_truth_cause": mapping["cause"],
-            "trigger_label": mapping["label"],
-            "drop_off_step": mapping["step"],
-            "status": "abandoned",
-            "cart_value": 150.0 + (i * 12.5),
-            "timestamp": now_iso,
-            "created_at": now_iso
-        }
-
-        try:
-            await db_client.save_session(session_doc)
-            logger.info(f"Saved simulated session: {session_id} ({mapping['label']})")
-        except Exception as e:
-            logger.warning(f"Failed to save session {session_id} to Firestore: {e}")
-
-        simulated_sessions.append(session_id)
+    try:
+        for i in range(count):
+            simulated_sessions.append(await simulator.generate_scenario(causes[i % len(causes)]))
+    except Exception as e:
+        logger.error(f"Simulation failed after {len(simulated_sessions)} session(s): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
 
     return {
         "status": "success",
-        "simulated_count": count,
+        "simulated_count": len(simulated_sessions),
         "session_ids": simulated_sessions,
-        "message": f"Successfully generated {count} mock session(s) with mapped enum causes."
+        "message": f"Successfully generated {len(simulated_sessions)} mock session(s) with event telemetry."
     }
 
-@app.post("/analyze")
+
+@app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_session(payload: dict):
     session_id = payload.get("session_id")
     if not session_id:
@@ -302,21 +291,22 @@ async def analyze_session(payload: dict):
         if session_data.get("is_nova_analysed") and session_data.get("nova_analysis"):
             logger.info(f"[Nova Diagnostics] Returning cached analysis for session {session_id}")
             cached = session_data["nova_analysis"]
-            return {
-                "session_id": session_id,
-                "primary_cause": cached.get("primary_cause", ground_truth),
-                "confidence_score": cached.get("confidence_score", 0.95),
-                "explanation": cached.get("explanation", f"Session dropped off due to {ground_truth}.")
-            }
+            return AnalyzeResponse(
+                session_id=session_id,
+                primary_cause=cached.get("primary_cause", ground_truth),
+                confidence_score=cached.get("confidence_score", 0.5),
+                explanation=cached.get("explanation", f"Session dropped off due to {ground_truth}."),
+                evidence_summary=cached.get("evidence_summary", [])
+            )
 
         # 2. Otherwise, run LangGraph workflow for the first time
         logger.info(f"[Nova Diagnostics] Invoking LangGraph workflow for session {session_id}...")
-        initial_state = {"session_id": session_id}
-        final_state = await nova_app.ainvoke(initial_state)
+        final_state = await nova_app.ainvoke({"session_id": session_id})
 
-        detected_cause = final_state.get("detected_cause", ground_truth)
-        confidence = final_state.get("confidence", 0.95)
+        detected_cause = final_state.get("detected_cause") or CauseCategory.UNKNOWN.value
+        confidence = final_state.get("confidence", 0.5)
         explanation = final_state.get("explanation_output", f"Session dropped off due to {detected_cause}.")
+        evidence = final_state.get("evidence_summary", [])
 
         # 3. Save results and flags back to Firestore
         analysis_payload = {
@@ -325,37 +315,32 @@ async def analyze_session(payload: dict):
                 "analysed_at": datetime.now(timezone.utc).isoformat(),
                 "primary_cause": detected_cause,
                 "confidence_score": confidence,
-                "explanation": explanation
+                "explanation": explanation,
+                "evidence_summary": evidence
             }
         }
         await doc_ref.set(analysis_payload, merge=True)
 
-        return {
-            "session_id": session_id,
-            "primary_cause": detected_cause,
-            "confidence_score": confidence,
-            "explanation": explanation
-        }
+        return AnalyzeResponse(
+            session_id=session_id,
+            primary_cause=detected_cause,
+            confidence_score=confidence,
+            explanation=explanation,
+            evidence_summary=evidence
+        )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error analyzing session {session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-from pydantic import BaseModel
-from typing import List
-
-
-class ExitIntentRequest(BaseModel):
-    cart_items: List[dict]
-    total_value: float
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
 
 
 @app.post("/agent/exit-intent")
 async def handle_exit_intent(payload: ExitIntentRequest):
     """Uses Vertex AI Gemini model to generate personalized exit-intent recovery copy."""
     item_count = len(payload.cart_items)
-    item_names = ", ".join([item["name"] for item in payload.cart_items]) if item_count > 0 else "items"
+    item_names = ", ".join(str(item.get("name", "item")) for item in payload.cart_items) or "items"
 
     prompt = (
         f"A retail shopper is about to abandon their shopping cart on Omnivo. "
@@ -365,9 +350,10 @@ async def handle_exit_intent(payload: ExitIntentRequest):
     )
 
     try:
-        response = model.generate_content(prompt)
+        response = await model.generate_content_async(prompt)
         ai_message = response.text.strip()
     except Exception as e:
+        logger.error(f"Exit-intent Gemini call failed: {e}", exc_info=True)
         ai_message = f"We noticed you left {item_count} items in your bag. Stay a bit longer and unlock special perks!"
 
     return {
@@ -375,6 +361,7 @@ async def handle_exit_intent(payload: ExitIntentRequest):
         "agent_name": "Nova Exit-Intent Agent",
         "message": ai_message
     }
+
 
 @app.post("/orders/checkout")
 async def checkout_order(payload: CheckoutOrderRequest):
@@ -385,19 +372,16 @@ async def checkout_order(payload: CheckoutOrderRequest):
     # Calculate fee breakdowns
     product_subtotal = sum(item.get("price", 0) for item in payload.cart_items)
 
-    # Determine shipping cost based on selected method string
+    # Determine shipping cost from the selected method, unless a Nova offer waived it
     shipping_cost = 0.0
-    if "Express" in payload.shipping_method:
-        shipping_cost = 150.0
-    elif "Priority" in payload.shipping_method:
-        shipping_cost = 350.0
+    if not payload.shipping_fee_waived:
+        shipping_cost = next((fee for key, fee in SHIPPING_FEES.items() if key in payload.shipping_method), 0.0)
 
-    platform_fee = 23.0
-    total_value = product_subtotal + shipping_cost + platform_fee
+    total_value = product_subtotal + shipping_cost + PLATFORM_FEE
 
     logger.info(
         f"Processing order {order_id}: Subtotal={product_subtotal}, Shipping={shipping_cost}, "
-        f"Platform={platform_fee}, Total={total_value}, Source={payload.recovery_source}")
+        f"Platform={PLATFORM_FEE}, Total={total_value}, Source={payload.recovery_source}")
 
     try:
         order_obj = OrderModel(
@@ -408,7 +392,7 @@ async def checkout_order(payload: CheckoutOrderRequest):
             item_count=len(payload.cart_items),
             product_subtotal=product_subtotal,
             shipping_cost=shipping_cost,
-            platform_fee=platform_fee,
+            platform_fee=PLATFORM_FEE,
             total_value=total_value,
             payment_gateway=payload.payment_method,
             shipping_method=payload.shipping_method,
@@ -429,14 +413,16 @@ async def checkout_order(payload: CheckoutOrderRequest):
         }
     except Exception as e:
         logger.error(f"Error processing order {order_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
+
 
 @app.delete("/sessions/{session_id}")
-async def delete_session_and_order(session_id: str):
+async def delete_session_and_order(session_id: str, x_admin_key: Optional[str] = Header(None)):
     """
     Delete a checkout session and any associated orders from Firestore.
-    Available exclusively via Swagger documentation.
+    Requires the X-Admin-Key header to match the ADMIN_API_KEY env var.
     """
+    require_admin(x_admin_key)
     try:
         # 1. Reference and delete the session document
         session_ref = db_client.db.collection("checkout_sessions").document(session_id)
@@ -448,12 +434,10 @@ async def delete_session_and_order(session_id: str):
         await session_ref.delete()
 
         # 2. Check and delete associated orders if any exist
-        orders_ref = db_client.db.collection("orders")
-        orders_query = orders_ref.where("session_id", "==", session_id)
-        orders_docs = orders_query.stream()
+        orders_query = db_client.db.collection("orders").where("session_id", "==", session_id)
 
         deleted_orders_count = 0
-        async for order_doc in orders_docs:
+        async for order_doc in orders_query.stream():
             await order_doc.reference.delete()
             deleted_orders_count += 1
 
@@ -462,9 +446,12 @@ async def delete_session_and_order(session_id: str):
             "status": "success",
             "message": f"Session {session_id} and {deleted_orders_count} associated order(s) successfully deleted."
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error deleting session {session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):

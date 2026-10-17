@@ -1,0 +1,12 @@
+.venv/
+venv/
+.env
+.git/
+.github/
+.idea/
+.agents/
+__pycache__/
+*.pyc
+*.json
+!service-account.json.example
+verify_firestore.py

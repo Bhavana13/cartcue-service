@@ -48,17 +48,7 @@ def classify_cause_node(state: NovaAgentState) -> Dict[str, Any]:
     events = state.get("events", [])
     cart_value = session_data.get("cart_value", 0.0)
 
-    # 1. Prioritize the ground_truth_cause stored directly in the session document (if available)
-    ground_truth = session_data.get("ground_truth_cause")
-    if ground_truth and ground_truth != "UNKNOWN":
-        logger.info(f"[Node: classify_cause] Using stored ground_truth_cause: {ground_truth}")
-        return {
-            "detected_cause": ground_truth,
-            "confidence": 0.95,
-            "evidence_summary": [f"Session explicitly recorded with cause: {ground_truth}"]
-        }
-
-    # 2. Fall back to rule-based event log analysis if no ground truth exists
+    # 1. Rule-based analysis of the session's event log
     detected_cause = CauseCategory.UNKNOWN.value
     confidence = 0.5
     evidence = []
@@ -94,8 +84,19 @@ def classify_cause_node(state: NovaAgentState) -> Dict[str, Any]:
             if percentage >= 10.0:
                 detected_cause = CauseCategory.SHIPPING_COST_SURPRISE.value
                 confidence = 0.90
-                evidence.append(f"Late shipping fee of ${shipping_cost:.2f} added {percentage:.1f}% to cart value (${cart_value:.2f}).")
+                evidence.append(f"Late shipping fee of Rs. {shipping_cost:.2f} added {percentage:.1f}% to cart value (Rs. {cart_value:.2f}).")
                 break
+
+    # 2. Fall back to the trigger recorded by the storefront when the event log is inconclusive
+    ground_truth = session_data.get("ground_truth_cause")
+    if detected_cause == CauseCategory.UNKNOWN.value and ground_truth and ground_truth != "UNKNOWN":
+        logger.info(f"[Node: classify_cause] No conclusive events; using recorded trigger: {ground_truth}")
+        detected_cause = ground_truth
+        confidence = 0.7
+        evidence.append(
+            f"No conclusive event telemetry; storefront recorded the drop-off trigger as {ground_truth} "
+            f"at step {session_data.get('drop_off_step', 'UNKNOWN')}."
+        )
 
     logger.info(f"[Node: classify_cause] Classified session {session_id} as '{detected_cause}' with confidence {confidence}")
     return {
@@ -131,7 +132,7 @@ async def generate_explanation_node(state: NovaAgentState) -> Dict[str, Any]:
 
     Instructions:
     1. Provide a concise, clear explanation (2-3 sentences) detailing WHY the user abandoned.
-    2. Cite explicit evidence (dollar amounts, latency numbers, error codes) retrieved from the event stream.
+    2. Cite explicit evidence (rupee amounts, latency numbers, error codes) retrieved from the event stream.
     3. Do NOT hallucinate unprovided events.
     """
 

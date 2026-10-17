@@ -11,8 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# Copy the application code (see .dockerignore) and drop root privileges
 COPY . .
+RUN useradd --create-home appuser
+USER appuser
 
 # Expose port (Cloud Run defaults to 8080)
 EXPOSE 8080

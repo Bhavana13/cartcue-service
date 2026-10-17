@@ -3,7 +3,7 @@ import logging
 from typing import Any, Dict, Optional, List
 from google.cloud import firestore
 from datetime import datetime, timezone
-from src.db.models import CheckoutEvent, CheckoutSession, NovaAnalysis, SessionStatus, OrderModel
+from src.db.models import CheckoutEvent, CheckoutSession, SessionStatus, OrderModel
 
 # Configure structured logging for the database client
 logger = logging.getLogger("cartcue-firestore")
@@ -85,19 +85,6 @@ class FirestoreClient:
             logger.error(f"Failed to update session status for {session_id}: {e}")
             return False
 
-    async def update_nova_analysis(self, session_id: str, analysis: NovaAnalysis) -> None:
-        logger.info(f"[Firestore] Updating Nova analysis for session: {session_id}")
-        try:
-            doc_ref = self.sessions_ref.document(session_id)
-            await doc_ref.update({
-                "detected_by_nova": True,
-                "nova_analysis": analysis.model_dump(mode="json")
-            })
-            logger.info(f"[Firestore] Successfully updated Nova analysis for session {session_id}")
-        except Exception as e:
-            logger.error(f"[Firestore] Error updating Nova analysis for {session_id}: {e}", exc_info=True)
-            raise
-
     async def get_historical_matches(self, drop_off_step: str, limit: int = 10) -> list[dict[str, Any] | None]:
         logger.info(f"[Firestore] Querying historical matches for step: {drop_off_step} (limit={limit})")
         try:
@@ -114,7 +101,7 @@ class FirestoreClient:
         """Fetches recent sessions for the CartCue AI Dashboard table."""
         logger.info(f"[Firestore] Fetching recent sessions (limit={limit})")
         try:
-            query = self.sessions_ref.limit(limit)
+            query = self.sessions_ref.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
             docs = await query.get()
             sessions = []
             for doc in docs:
@@ -125,40 +112,7 @@ class FirestoreClient:
             return sessions
         except Exception as e:
             logger.error(f"[Firestore] Error fetching recent sessions: {e}", exc_info=True)
-            return []
-
-    async def get_analytics_summary(self) -> Dict[str, Any]:
-        """Calculates aggregate metrics for the executive dashboard header."""
-        logger.info("[Firestore] Calculating analytics summary metrics...")
-        try:
-            docs = await self.sessions_ref.limit(50).get()
-            total_sessions = len(docs)
-            total_revenue = 0.0
-            causes_count = {}
-
-            for doc in docs:
-                data = doc.to_dict()
-                total_revenue += float(data.get("cart_value", 0.0))
-                cause = data.get("ground_truth_cause", "UNKNOWN")
-                causes_count[cause] = causes_count.get(cause, 0) + 1
-
-            top_cause = max(causes_count, key=causes_count.get) if causes_count else "N/A"
-            logger.info(f"[Firestore] Analytics summary calculated: {total_sessions} sessions, Top cause: {top_cause}")
-
-            return {
-                "total_abandoned_sessions": total_sessions,
-                "recovery_rate_percentage": 28.5,
-                "top_abandonment_cause": top_cause,
-                "total_revenue_at_risk": round(total_revenue, 2)
-            }
-        except Exception as e:
-            logger.error(f"[Firestore] Error calculating analytics summary: {e}", exc_info=True)
-            return {
-                "total_abandoned_sessions": 0,
-                "recovery_rate_percentage": 0.0,
-                "top_abandonment_cause": "N/A",
-                "total_revenue_at_risk": 0.0
-            }
+            raise
 
     async def save_order(self, order: OrderModel) -> str:
         """Saves a validated OrderModel to the 'orders' collection AND synchronizes it as a COMPLETED session in 'checkout_sessions'."""

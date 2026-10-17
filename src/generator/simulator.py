@@ -2,7 +2,7 @@ import asyncio
 import logging
 import random
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List
 from src.db.firestore_client import FirestoreClient
 from src.db.models import CauseCategory, CheckoutSession, CheckoutEvent, SessionStatus
@@ -16,8 +16,8 @@ class SessionSimulator:
 
     async def generate_scenario(self, cause: CauseCategory) -> str:
         session_id = f"cs_{uuid.uuid4().hex[:8]}"
-        now = datetime.utcnow()
-        cart_val = round(random.uniform(45.0, 220.0), 2)
+        now = datetime.now(timezone.utc)
+        cart_val = round(random.uniform(500.0, 5000.0), 2)
 
         logger.info(f"[Simulator] Generating mock scenario for cause: {cause.value} (ID: {session_id})")
 
@@ -102,13 +102,10 @@ class SessionSimulator:
                 )
             )
 
-        try:
-            await self.db.save_session(session)
-            for event in events:
-                await self.db.add_event(session_id, event)
-            logger.info(f"[Simulator] Successfully saved scenario {session_id} with {len(events)} event(s) to Firestore.")
-        except Exception as e:
-            logger.error(f"[Simulator] Error saving scenario {session_id}: {e}", exc_info=True)
+        await self.db.save_session(session)
+        for event in events:
+            await self.db.add_event(session_id, event)
+        logger.info(f"[Simulator] Successfully saved scenario {session_id} with {len(events)} event(s) to Firestore.")
 
         return session_id
 

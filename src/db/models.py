@@ -13,6 +13,7 @@ class CauseCategory(str, Enum):
 class SessionStatus(str, Enum):
     ACTIVE = "ACTIVE"
     ABANDONED = "ABANDONED"
+    WAITING_ON_USER_TO_ACT = "WAITING_ON_USER_TO_ACT"
     COMPLETED = "COMPLETED"
 
 class CheckoutEvent(BaseModel):
@@ -73,8 +74,13 @@ class CheckoutOrderRequest(BaseModel):
     total_value: float
     payment_method: Optional[str] = "PhonePe"
     shipping_method: Optional[str] = "Standard Delivery (Free)"
+    shipping_fee_waived: bool = False  # Set when a Nova offer unlocked free delivery
     recovery_source: Optional[str] = "ORGANIC"
     nova_intervention_triggered: Optional[bool] = False
+
+class ExitIntentRequest(BaseModel):
+    cart_items: List[dict]
+    total_value: float
 
 class OrderModel(BaseModel):
     order_id: str
