@@ -58,7 +58,7 @@ Nova only spends margin when the diagnosis says price is the problem. One playbo
 
 ### Nova bell offer (`POST /agent/exit-intent`)
 
-The store calls this when a shopper hesitates (bag idle, or the mouse heads for the tab bar). Nova runs the **rules** on the live bag to pick the cause and offer. Gemini then writes a short notification describing only that offer, with no invented codes or perks. If the shopper dismisses the offer, the store saves the bag as an abandoned session (`origin: NOVA_OFFER_DISMISSED`) for later diagnosis and recovery. If the shopper orders later, checkout reuses that session.
+The store calls this when a shopper hesitates (closes the bag without paying, or the mouse heads for the tab bar). Nova runs the **rules** on the live bag to pick the cause and offer. Gemini then writes a short notification describing only that offer, with no invented codes or perks. If the shopper dismisses the offer, the store saves the bag as an abandoned session (`origin: NOVA_OFFER_DISMISSED`) for later diagnosis and recovery. If the shopper orders later, checkout reuses that session.
 
 ## API
 
