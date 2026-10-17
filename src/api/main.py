@@ -366,7 +366,8 @@ async def analyze_session(payload: dict):
 
 @app.post("/agent/exit-intent")
 async def handle_exit_intent(payload: ExitIntentRequest):
-    """Diagnoses the live checkout with Nova's rules, picks the matching offer, and has Gemini describe only that offer."""
+    """Powers the Nova bell notification: diagnoses the live bag with Nova's rules, picks the matching offer,
+    and has Gemini describe only that offer."""
     item_count = len(payload.cart_items)
     item_names = ", ".join(str(item.get("name", "item")) for item in payload.cart_items) or "items"
     subtotal = sum(float(item.get("price", 0)) for item in payload.cart_items)
@@ -388,9 +389,9 @@ async def handle_exit_intent(payload: ExitIntentRequest):
         reason = "no specific friction, so likely price hesitation"
 
     prompt = (
-        f"A retail shopper is about to leave Omnivo with {item_count} items in their bag: {item_names}. "
+        f"A retail shopper on Omnivo is hesitating with {item_count} items in their bag: {item_names}. "
         f"Bag subtotal: Rs. {subtotal:.0f}. Nova diagnosed the likely reason as {reason}. "
-        f"Act as Nova, an AI retail recovery agent. Write a short, warm, persuasive exit-intent popup message "
+        f"Act as Nova, an AI retail recovery agent. Write a short, warm in-app notification "
         f"(under 2 sentences) presenting exactly this offer: {play['offer_label']}. The shopper applies it with a button, "
         f"so do not mention coupon codes, and do not invent any other discount, percentage, deadline or perk."
     )
@@ -417,7 +418,8 @@ async def handle_exit_intent(payload: ExitIntentRequest):
 async def checkout_order(payload: CheckoutOrderRequest):
     """Processes successful checkout with detailed cost breakdowns and saves to 'orders'."""
     order_id = f"ORD-{uuid.uuid4().hex[:6].upper()}"
-    session_id = f"cs_{uuid.uuid4().hex[:8]}"
+    # Completing a captured abandoned session keeps its events and diagnosis on the same document
+    session_id = payload.session_id or f"cs_{uuid.uuid4().hex[:8]}"
 
     # Calculate fee breakdowns
     product_subtotal = sum(item.get("price", 0) for item in payload.cart_items)

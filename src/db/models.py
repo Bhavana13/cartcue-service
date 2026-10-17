@@ -55,6 +55,8 @@ class CheckoutSession(BaseModel):
     ground_truth_cause: Optional[CauseCategory] = CauseCategory.UNKNOWN
     detected_by_nova: bool = False
     nova_analysis: Optional[NovaAnalysis] = None
+    # How the abandoned session was captured, e.g. NOVA_OFFER_DISMISSED; None for demo triggers and simulations
+    origin: Optional[str] = None
     # Storefront telemetry; stored in the session's 'events' subcollection, not on the session document
     events: List[CheckoutEvent] = Field(default_factory=list, exclude=True)
 
@@ -78,6 +80,7 @@ class CheckoutOrderRequest(BaseModel):
     payment_method: Optional[str] = "PhonePe"
     shipping_method: Optional[str] = "Standard Delivery (Free)"
     shipping_fee_waived: bool = False  # Set when a Nova offer unlocked free delivery
+    session_id: Optional[str] = None  # Abandoned session this order completes, if the store captured one
     recovery_source: Optional[str] = "ORGANIC"
     nova_intervention_triggered: Optional[bool] = False
 
