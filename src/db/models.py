@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional, Dict, Any
@@ -17,7 +18,7 @@ class SessionStatus(str, Enum):
     COMPLETED = "COMPLETED"
 
 class CheckoutEvent(BaseModel):
-    event_id: str
+    event_id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:6]}")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     event_type: str
     step_name: str
@@ -54,6 +55,8 @@ class CheckoutSession(BaseModel):
     ground_truth_cause: Optional[CauseCategory] = CauseCategory.UNKNOWN
     detected_by_nova: bool = False
     nova_analysis: Optional[NovaAnalysis] = None
+    # Storefront telemetry; stored in the session's 'events' subcollection, not on the session document
+    events: List[CheckoutEvent] = Field(default_factory=list, exclude=True)
 
     @field_validator('status', mode='before')
     @classmethod
@@ -81,6 +84,8 @@ class CheckoutOrderRequest(BaseModel):
 class ExitIntentRequest(BaseModel):
     cart_items: List[dict]
     total_value: float
+    shipping_fee: float = 0.0  # Fee of the shipping option currently shown to the shopper
+    shipping_method: Optional[str] = None
 
 class OrderModel(BaseModel):
     order_id: str

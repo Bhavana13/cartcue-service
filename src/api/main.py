@@ -15,6 +15,7 @@ import vertexai
 from vertexai.generative_models import GenerativeModel
 
 from src.agent.graph import nova_app
+from src.agent.nodes import classify_by_rules
 from src.db.firestore_client import FirestoreClient
 from src.db.models import CauseCategory, CheckoutSession, WishlistHesitationRequest, SessionStatus, \
     CheckoutOrderRequest, ExitIntentRequest, OrderModel, CartItem
@@ -56,6 +57,44 @@ PLATFORM_FEE = 23.0
 
 INTERNAL_ERROR = "Internal server error. Check service logs for details."
 
+# Nova's recovery playbook: margin is only spent when the diagnosis says price is the problem.
+RECOVERY_PLAYBOOK = {
+    CauseCategory.SHIPPING_COST_SURPRISE.value: {
+        "offer_type": "FREE_SHIPPING",
+        "offer_label": "Free delivery on this order",
+        "email_subject": "Your Omnivo order now ships free",
+        "email_body": "The delivery fee surprised you at checkout, so we've removed it. Your cart is saved: click here to finish with free delivery.",
+    },
+    CauseCategory.PAYMENT_FRICTION.value: {
+        "offer_type": "ALT_PAYMENT",
+        "offer_label": "Retry with another payment method",
+        "email_subject": "Your payment didn't go through. Your cart is saved",
+        "email_body": "The payment gateway timed out, not you. Click here to finish with another payment method (UPI, card or wallet). No changes to your order.",
+    },
+    CauseCategory.TECHNICAL_DROP_OFF.value: {
+        "offer_type": "RESTORE_CART",
+        "offer_label": "Guest checkout with your cart restored",
+        "email_subject": "Sorry about that. Your Omnivo cart is ready",
+        "email_body": "Checkout was slow and asked you to sign up. Click here to finish as a guest with your cart already restored.",
+    },
+    CauseCategory.COUPON_PROMO_FAILURE.value: {
+        "offer_type": "PERCENT_OFF_10",
+        "offer_label": "10% off every item in the bag",
+        "email_subject": "Your Omnivo discount is waiting in your cart",
+        "email_body": "Your promo code didn't apply, so we've added a 10% discount to your saved cart. Click here to finish at the price you expected.",
+    },
+    CauseCategory.UNKNOWN.value: {
+        "offer_type": "PERCENT_OFF_10",
+        "offer_label": "10% off every item in the bag",
+        "email_subject": "Still thinking it over? Here's 10% off",
+        "email_body": "Your items are still in your cart, and we've added 10% off to help you decide. Click here to resume your checkout.",
+    },
+}
+
+
+def playbook_for(cause: Optional[str]) -> dict:
+    return RECOVERY_PLAYBOOK.get(cause or "", RECOVERY_PLAYBOOK[CauseCategory.UNKNOWN.value])
+
 
 class AnalyzeResponse(BaseModel):
     session_id: str
@@ -93,11 +132,13 @@ async def get_recent_sessions(limit: int = Query(10, ge=1, le=50)):
 
 @app.post("/sessions")
 async def create_storefront_session(session: CheckoutSession):
-    """Receives and saves a live checkout session from the Omnivo storefront."""
+    """Receives and saves a live checkout session, plus any event telemetry, from the Omnivo storefront."""
     logger.info(f"Received storefront session save request for ID: {session.session_id}")
     try:
         await db_client.save_session(session)
-        logger.info(f"Successfully saved storefront session: {session.session_id}")
+        for event in session.events:
+            await db_client.add_event(session.session_id, event)
+        logger.info(f"Successfully saved storefront session: {session.session_id} with {len(session.events)} event(s)")
         return {"status": "success", "session_id": session.session_id, "message": "Session saved successfully."}
     except Exception as e:
         logger.error(f"Error saving storefront session {session.session_id}: {e}", exc_info=True)
@@ -118,28 +159,15 @@ async def recover_session(session_id: str):
         cause = (session_data.get("nova_analysis") or {}).get("primary_cause") \
             or session_data.get("ground_truth_cause", "UNKNOWN")
 
-        # Tailor the mock email based on the specific diagnostic root cause
-        if cause == "SHIPPING_COST_SURPRISE":
-            email_subject = "Complete your Omnivo order with FREE Express Shipping!"
-            email_body = "We noticed you left your cart due to shipping costs. Here is a special voucher for free priority delivery to complete your order."
-        elif cause == "PAYMENT_FRICTION":
-            email_subject = "Having trouble checking out? We're here to help!"
-            email_body = "It looks like your payment didn't go through. Click here to use our secure alternative checkout link."
-        elif cause == "TECHNICAL_DROP_OFF":
-            email_subject = "Resume your Omnivo Cart - Special Assistance"
-            email_body = "We resolved the account wall issue you encountered. Click here to instantly restore your cart items and finish checking out."
-        elif cause == "COUPON_PROMO_FAILURE":
-            email_subject = "Your Omnivo discount is still waiting!"
-            email_body = "Sorry your promo code didn't apply. Here is a fresh code so you can complete your order at the price you expected."
-        else:
-            email_subject = "Complete your Omnivo order!"
-            email_body = "We noticed you left behind items in your cart. Click here to resume your checkout."
-
-        # Simulate a targeted recovery email based on the diagnostic cause
+        # Tailor the mock email and offer to the diagnosed root cause
+        play = playbook_for(cause)
         mock_email = {
             "recipient": f"customer_{session_id}@example.com",
-            "subject": email_subject,
-            "body": email_body,
+            "subject": play["email_subject"],
+            "body": play["email_body"],
+            "diagnosed_cause": cause,
+            "offer_type": play["offer_type"],
+            "offer_label": play["offer_label"],
             "sent_at": datetime.now(timezone.utc).isoformat()
         }
 
@@ -338,24 +366,32 @@ async def analyze_session(payload: dict):
 
 @app.post("/agent/exit-intent")
 async def handle_exit_intent(payload: ExitIntentRequest):
-    """Picks a concrete exit-intent offer and has Gemini write popup copy that describes only that offer."""
+    """Diagnoses the live checkout with Nova's rules, picks the matching offer, and has Gemini describe only that offer."""
     item_count = len(payload.cart_items)
     item_names = ", ".join(str(item.get("name", "item")) for item in payload.cart_items) or "items"
     subtotal = sum(float(item.get("price", 0)) for item in payload.cart_items)
 
-    # Same profiling heuristic as the wishlist agent: bigger baskets value delivery speed over a discount
-    if subtotal > 1500:
-        offer_type = "FREE_PRIORITY_DELIVERY"
-        offer_label = "Free Same-Day Priority Delivery (worth Rs. 350)"
+    # What the shopper is looking at right now, as telemetry for Nova's classifier
+    live_state = {
+        "session_id": "live-exit-intent",
+        "session_data": {"cart_value": subtotal + payload.shipping_fee + PLATFORM_FEE},
+        "events": [{"event_type": "STEP_TRANSITION", "step_name": "REVIEW",
+                    "metadata": {"shipping_cost_shown": payload.shipping_fee}}],
+    }
+    diagnosis = classify_by_rules(live_state)
+    cause = diagnosis["detected_cause"]
+    play = playbook_for(cause)
+
+    if cause == CauseCategory.SHIPPING_COST_SURPRISE.value:
+        reason = f"the Rs. {payload.shipping_fee:.0f} delivery fee ({payload.shipping_method or 'selected shipping'})"
     else:
-        offer_type = "PERCENT_OFF_10"
-        offer_label = "10% off every item in the bag"
+        reason = "no specific friction, so likely price hesitation"
 
     prompt = (
         f"A retail shopper is about to leave Omnivo with {item_count} items in their bag: {item_names}. "
-        f"Bag subtotal: Rs. {subtotal:.0f}. "
+        f"Bag subtotal: Rs. {subtotal:.0f}. Nova diagnosed the likely reason as {reason}. "
         f"Act as Nova, an AI retail recovery agent. Write a short, warm, persuasive exit-intent popup message "
-        f"(under 2 sentences) presenting exactly this offer: {offer_label}. The shopper applies it with a button, "
+        f"(under 2 sentences) presenting exactly this offer: {play['offer_label']}. The shopper applies it with a button, "
         f"so do not mention coupon codes, and do not invent any other discount, percentage, deadline or perk."
     )
 
@@ -364,14 +400,16 @@ async def handle_exit_intent(payload: ExitIntentRequest):
         ai_message = response.text.strip()
     except Exception as e:
         logger.error(f"Exit-intent Gemini call failed: {e}", exc_info=True)
-        ai_message = f"Before you go: Nova has unlocked {offer_label} just for you."
+        ai_message = f"Before you go: Nova has unlocked {play['offer_label'].lower()} just for you."
 
     return {
         "status": "success",
         "agent_name": "Nova Exit-Intent Agent",
         "message": ai_message,
-        "offer_type": offer_type,
-        "offer_label": offer_label
+        "diagnosed_cause": cause,
+        "evidence_summary": diagnosis["evidence_summary"],
+        "offer_type": play["offer_type"],
+        "offer_label": play["offer_label"]
     }
 
 
