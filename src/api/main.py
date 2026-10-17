@@ -516,6 +516,36 @@ async def delete_session_and_order(session_id: str, x_admin_key: Optional[str] =
         raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
 
 
+WIPE_CONFIRMATION = "DELETE_ALL_DATA"
+
+
+@app.delete("/admin/data")
+async def delete_all_data(confirm: Optional[str] = Query(None), x_admin_key: Optional[str] = Header(None)):
+    """
+    Delete ALL demo data: every checkout session with its events subcollection (orphaned events included) and every order.
+    Requires the X-Admin-Key header and ?confirm=DELETE_ALL_DATA, so it can't run by accident.
+    """
+    require_admin(x_admin_key)
+    if confirm != WIPE_CONFIRMATION:
+        raise HTTPException(status_code=400, detail=f"Add ?confirm={WIPE_CONFIRMATION} to delete all data")
+    try:
+        # recursive_delete removes each document and everything beneath it, including subcollections whose parent is gone
+        deleted_sessions_and_events = await db_client.db.recursive_delete(db_client.db.collection("checkout_sessions"))
+        deleted_orders = await db_client.db.recursive_delete(db_client.db.collection("orders"))
+
+        logger.warning(f"[Admin] Wiped all data: {deleted_sessions_and_events} session/event document(s), "
+                       f"{deleted_orders} order(s).")
+        return {
+            "status": "success",
+            "deleted_session_and_event_documents": deleted_sessions_and_events,
+            "deleted_orders": deleted_orders,
+            "message": "All checkout sessions, their events and all orders were deleted."
+        }
+    except Exception as e:
+        logger.error(f"Error wiping data: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=INTERNAL_ERROR)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     logger.error(f"Validation error for request {request.url}: {exc.errors()}")

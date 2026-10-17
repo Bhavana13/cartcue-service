@@ -75,6 +75,7 @@ The store calls this when a shopper hesitates (closes the bag without paying, or
 | GET | `/analytics/summary` | Abandoned/completed counts, revenue at risk, AI-recovered orders and revenue |
 | POST | `/simulate?count=N` | Create simulated abandoned sessions with telemetry |
 | DELETE | `/sessions/{id}` | Delete everything for a session: its events, its orders and the session document (also cleans orphaned events). Requires the `X-Admin-Key` header |
+| DELETE | `/admin/data?confirm=DELETE_ALL_DATA` | Delete **all** data: every session, its events (orphans included) and every order. Requires the `X-Admin-Key` header and the `confirm` parameter |
 
 Full request and response schemas are at `/docs`.
 
@@ -128,7 +129,7 @@ To use the Firestore emulator instead of a live database, set `FIRESTORE_EMULATO
 | `GCP_PROJECT_ID` | `cartcue-ai-builder-cup` | Project for Firestore and Vertex AI |
 | `GCP_REGION` | `us-central1` | Vertex AI region |
 | `FIRESTORE_DATABASE` | `(default)` | Firestore database ID |
-| `ADMIN_API_KEY` | unset | Unlocks `DELETE /sessions/{id}` (send it as `X-Admin-Key`). When unset, DELETE is always refused |
+| `ADMIN_API_KEY` | unset | Unlocks `DELETE /sessions/{id}` and `DELETE /admin/data` (send it as `X-Admin-Key`). When unset, both are always refused |
 
 ## Deployment
 
