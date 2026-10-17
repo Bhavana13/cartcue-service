@@ -338,15 +338,25 @@ async def analyze_session(payload: dict):
 
 @app.post("/agent/exit-intent")
 async def handle_exit_intent(payload: ExitIntentRequest):
-    """Uses Vertex AI Gemini model to generate personalized exit-intent recovery copy."""
+    """Picks a concrete exit-intent offer and has Gemini write popup copy that describes only that offer."""
     item_count = len(payload.cart_items)
     item_names = ", ".join(str(item.get("name", "item")) for item in payload.cart_items) or "items"
+    subtotal = sum(float(item.get("price", 0)) for item in payload.cart_items)
+
+    # Same profiling heuristic as the wishlist agent: bigger baskets value delivery speed over a discount
+    if subtotal > 1500:
+        offer_type = "FREE_PRIORITY_DELIVERY"
+        offer_label = "Free Same-Day Priority Delivery (worth Rs. 350)"
+    else:
+        offer_type = "PERCENT_OFF_10"
+        offer_label = "10% off every item in the bag"
 
     prompt = (
-        f"A retail shopper is about to abandon their shopping cart on Omnivo. "
-        f"They have {item_count} items in their bag: {item_names}. Total cart value: Rs. {payload.total_value}. "
-        f"Act as Nova, an AI retail recovery agent. Generate a short, punchy, persuasive exit-intent popup message "
-        f"offering an incentive to convince them to stay. Keep it under 2 sentences."
+        f"A retail shopper is about to leave Omnivo with {item_count} items in their bag: {item_names}. "
+        f"Bag subtotal: Rs. {subtotal:.0f}. "
+        f"Act as Nova, an AI retail recovery agent. Write a short, warm, persuasive exit-intent popup message "
+        f"(under 2 sentences) presenting exactly this offer: {offer_label}. The shopper applies it with a button, "
+        f"so do not mention coupon codes, and do not invent any other discount, percentage, deadline or perk."
     )
 
     try:
@@ -354,12 +364,14 @@ async def handle_exit_intent(payload: ExitIntentRequest):
         ai_message = response.text.strip()
     except Exception as e:
         logger.error(f"Exit-intent Gemini call failed: {e}", exc_info=True)
-        ai_message = f"We noticed you left {item_count} items in your bag. Stay a bit longer and unlock special perks!"
+        ai_message = f"Before you go: Nova has unlocked {offer_label} just for you."
 
     return {
         "status": "success",
         "agent_name": "Nova Exit-Intent Agent",
-        "message": ai_message
+        "message": ai_message,
+        "offer_type": offer_type,
+        "offer_label": offer_label
     }
 
 
