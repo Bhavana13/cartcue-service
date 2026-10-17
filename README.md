@@ -74,7 +74,7 @@ The store calls this when a shopper hesitates (closes the bag without paying, or
 | POST | `/orders/checkout` | Place an order; completes `session_id` when given |
 | GET | `/analytics/summary` | Abandoned/completed counts, revenue at risk, AI-recovered orders and revenue |
 | POST | `/simulate?count=N` | Create simulated abandoned sessions with telemetry |
-| DELETE | `/sessions/{id}` | Delete a session and its orders. Requires the `X-Admin-Key` header |
+| DELETE | `/sessions/{id}` | Delete everything for a session: its events, its orders and the session document (also cleans orphaned events). Requires the `X-Admin-Key` header |
 
 Full request and response schemas are at `/docs`.
 

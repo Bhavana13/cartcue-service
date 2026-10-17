@@ -471,32 +471,43 @@ async def checkout_order(payload: CheckoutOrderRequest):
 @app.delete("/sessions/{session_id}")
 async def delete_session_and_order(session_id: str, x_admin_key: Optional[str] = Header(None)):
     """
-    Delete a checkout session and any associated orders from Firestore.
+    Delete everything stored for a session: its events subcollection, its orders and the session document.
+    Also cleans up orphaned events whose session document is already gone.
     Requires the X-Admin-Key header to match the ADMIN_API_KEY env var.
     """
     require_admin(x_admin_key)
     try:
-        # 1. Reference and delete the session document
         session_ref = db_client.db.collection("checkout_sessions").document(session_id)
         session_doc = await session_ref.get()
 
-        if not session_doc.exists:
-            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        # 1. Events subcollection (Firestore doesn't delete subcollections with their parent document)
+        deleted_events_count = 0
+        async for event_doc in session_ref.collection("events").stream():
+            await event_doc.reference.delete()
+            deleted_events_count += 1
 
-        await session_ref.delete()
-
-        # 2. Check and delete associated orders if any exist
-        orders_query = db_client.db.collection("orders").where("session_id", "==", session_id)
-
+        # 2. Orders placed for this session
         deleted_orders_count = 0
-        async for order_doc in orders_query.stream():
+        async for order_doc in db_client.db.collection("orders").where("session_id", "==", session_id).stream():
             await order_doc.reference.delete()
             deleted_orders_count += 1
 
-        logger.info(f"[Admin] Deleted session {session_id} and {deleted_orders_count} associated orders.")
+        # 3. The session document itself
+        if session_doc.exists:
+            await session_ref.delete()
+        elif deleted_events_count == 0 and deleted_orders_count == 0:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+        logger.info(f"[Admin] Deleted session {session_id} (document: {session_doc.exists}), "
+                    f"{deleted_events_count} event(s) and {deleted_orders_count} order(s).")
         return {
             "status": "success",
-            "message": f"Session {session_id} and {deleted_orders_count} associated order(s) successfully deleted."
+            "session_id": session_id,
+            "deleted_session_document": session_doc.exists,
+            "deleted_events": deleted_events_count,
+            "deleted_orders": deleted_orders_count,
+            "message": f"Session {session_id}: deleted {deleted_events_count} event(s) and {deleted_orders_count} order(s)"
+                       + (" and the session document." if session_doc.exists else "; the session document was already gone.")
         }
     except HTTPException:
         raise
