@@ -1,13 +1,14 @@
 import logging
 import uuid
-from datetime import datetime, timezone
 from typing import List
 
-from fastapi import FastAPI, HTTPException, Query, Request, logger
+from fastapi import FastAPI, Query, Request, logger
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from vertexai.generative_models import GenerativeModel
 
 from src.agent.graph import nova_app
 from src.db.firestore_client import FirestoreClient
@@ -20,6 +21,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("cartcue-api")
+
+model = GenerativeModel("gemini-1.5-flash")
 
 app = FastAPI(
     title="CartCue CheckoutSense API",
@@ -337,6 +340,41 @@ async def analyze_session(payload: dict):
     except Exception as e:
         logger.error(f"Error analyzing session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+from pydantic import BaseModel
+from typing import List
+
+
+class ExitIntentRequest(BaseModel):
+    cart_items: List[dict]
+    total_value: float
+
+
+@app.post("/agent/exit-intent")
+async def handle_exit_intent(payload: ExitIntentRequest):
+    """Uses Vertex AI Gemini model to generate personalized exit-intent recovery copy."""
+    item_count = len(payload.cart_items)
+    item_names = ", ".join([item["name"] for item in payload.cart_items]) if item_count > 0 else "items"
+
+    prompt = (
+        f"A retail shopper is about to abandon their shopping cart on Omnivo. "
+        f"They have {item_count} items in their bag: {item_names}. Total cart value: Rs. {payload.total_value}. "
+        f"Act as Nova, an AI retail recovery agent. Generate a short, punchy, persuasive exit-intent popup message "
+        f"offering an incentive to convince them to stay. Keep it under 2 sentences."
+    )
+
+    try:
+        response = model.generate_content(prompt)
+        ai_message = response.text.strip()
+    except Exception as e:
+        ai_message = f"We noticed you left {item_count} items in your bag. Stay a bit longer and unlock special perks!"
+
+    return {
+        "status": "success",
+        "agent_name": "Nova Exit-Intent Agent",
+        "message": ai_message
+    }
 
 @app.post("/orders/checkout")
 async def checkout_order(payload: CheckoutOrderRequest):
